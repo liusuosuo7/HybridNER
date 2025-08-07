@@ -5,8 +5,10 @@ import os
 from re import X
 from typing import Dict
 from models.framework import FewShotNERFramework
+from models.enhanced_framework import EnhancedNERFramework
 from dataloaders.spanner_dataset import get_span_labels, get_loader
 from models.bert_model_spanner import BertNER
+from models.combined_spanner import CombinedSpanNER
 from transformers import AutoTokenizer
 from models.config_spanner import BertNerConfig
 import random
@@ -136,6 +138,17 @@ def main():
     parser.add_argument("--selectShot_dir", type=str, default="data/conll03/spanSelect.dev", help="few-shot data files, such as: data/conll03/spanSelect.dev.")
     parser.add_argument("--linkSave_dir", type=str, default="results/", help="After the results of gpt3.5 classification, the path to save the file")
     parser.add_argument("--threshold", type=float, default="0.4", help="Uncertainty threshold, used to confirm the uncertainty interval of local model and gpt3.5 classification.")
+    
+    # Combination arguments for enhanced spanNER
+    parser.add_argument("--use_combination", type=str2bool, default=False, help="Whether to use model combination functionality")
+    parser.add_argument("--combination_models", type=str, nargs='*', default=[], help="List of model result files to combine")
+    parser.add_argument("--combination_method", type=str, default="voting_majority", 
+                       choices=["voting_majority", "voting_weightByOverallF1", "voting_weightByCategotyF1", "voting_spanPred_onlyScore"],
+                       help="Method for combining multiple model predictions")
+    parser.add_argument("--combination_results_dir", type=str, default="", help="Directory containing model result files for combination")
+    parser.add_argument("--combination_prob_file", type=str, default="", help="Probability file for span prediction combination")
+    parser.add_argument("--combination_standard_file", type=str, default="", help="Standard result file for combination")
+    parser.add_argument("--combination_classes", type=str, nargs='*', default=[], help="Entity classes for combination (e.g., ORG PER LOC MISC)")
 
     args = parser.parse_args()
 
@@ -159,10 +172,22 @@ def main():
                                                         hidden_dropout_prob=args.bert_dropout,
                                                         attention_probs_dropout_prob=args.bert_dropout,
                                                         model_dropout=args.model_dropout)
-    model = BertNER.from_pretrained(args.bert_config_dir,
-                                                    config=bert_config,
-                                                    args=args)
-    model.cuda()
+    
+    # Use combined spanNER if combination is enabled, otherwise use regular spanNER
+    if args.use_combination:
+        print("Using Combined SpanNER with model combination functionality")
+        model = CombinedSpanNER.from_pretrained(args.bert_config_dir,
+                                               config=bert_config,
+                                               args=args)
+        print(f"Combination info: {model.get_combination_info()}")
+    else:
+        print("Using regular SpanNER")
+        model = BertNER.from_pretrained(args.bert_config_dir,
+                                       config=bert_config,
+                                       args=args)
+    
+    if torch.cuda.is_available():
+        model.cuda()
     
     train_data_loader = get_loader(args, args.data_dir, "train", True)
     dev_data_loader = get_loader(args, args.data_dir, "dev", False)
@@ -179,19 +204,36 @@ def main():
 
     edl = Span_Evidence(args, num_labels)
     logger = get_logger(args, seed_num)
-    framework = FewShotNERFramework(args, 
-                                    logger, 
-                                    task_idx2label, 
-                                    train_data_loader, 
-                                    dev_data_loader, 
-                                    test_data_loader, 
-                                    edl, 
-                                    seed_num, 
-                                    num_labels=num_labels)
+    
+    # Use enhanced framework if combination is enabled
+    if args.use_combination:
+        framework = EnhancedNERFramework(args, 
+                                        logger, 
+                                        task_idx2label, 
+                                        train_data_loader, 
+                                        dev_data_loader, 
+                                        test_data_loader, 
+                                        edl, 
+                                        seed_num, 
+                                        num_labels=num_labels)
+        logger.info(f"Enhanced framework info: {framework.get_framework_info()}")
+    else:
+        framework = FewShotNERFramework(args, 
+                                        logger, 
+                                        task_idx2label, 
+                                        train_data_loader, 
+                                        dev_data_loader, 
+                                        test_data_loader, 
+                                        edl, 
+                                        seed_num, 
+                                        num_labels=num_labels)
     
     # train
     if args.state == 'train':
-        framework.train(model)
+        if args.use_combination and hasattr(framework, 'train_with_combination_awareness'):
+            framework.train_with_combination_awareness(model)
+        else:
+            framework.train(model)
         logger.info("training is ended! 🎉")
 
     # inference
