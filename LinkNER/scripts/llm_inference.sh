@@ -14,4 +14,5 @@ python main.py \
     --llm_ckpt "$LLM_CKPT" \
     --selectShot_dir None \
     --shot 0 \
-    --threshold 0.4
+    --threshold 0.4 \
+    # --use_combiner true

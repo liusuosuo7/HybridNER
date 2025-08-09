@@ -136,4 +136,14 @@ def get_args():
                         help="Path to save files after results from GPT-3.5 classification.")
     parser.add_argument("--threshold", type=float, default=0.4, help="Uncertainty threshold.")
 
+    # --------------------- Combiner (merge multiple NER models) --------------------
+    parser.add_argument('--use_combiner', type=str2bool, default=False,
+                        help='Enable combining external model predictions with spanNER outputs')
+    parser.add_argument('--comb_files', type=str, default=None,
+                        help='Comma-separated list of JSONL files from other NER models to combine. Each file must follow the LinkNER JSONL schema with keys: sentence, entity[].')
+    parser.add_argument('--comb_method', type=str, default='majority', choices=['majority', 'weighted'],
+                        help='Combination method for voting over labels per span')
+    parser.add_argument('--comb_weights', type=str, default=None,
+                        help='Optional comma-separated weights for each external file (and optionally base). If not provided, equal weights are used. For weighted method, base model weight defaults to 1.0; external weights apply in the order of comb_files.')
+
     return parser.parse_args()

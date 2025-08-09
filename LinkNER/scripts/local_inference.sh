@@ -18,7 +18,11 @@ python main.py \
     --n_class 5 \
     --etrans_func softmax \
     --loss ce \
-    --test_mode ori
+    --test_mode ori \
+    # --use_combiner true \
+    # --comb_files "/path/to/other_model1.jsonl,/path/to/other_model2.jsonl" \
+    # --comb_method weighted \
+    # --comb_weights "1.0,0.8,0.7"  # base, model1, model2
 
 # # ener test
 # python main.py \

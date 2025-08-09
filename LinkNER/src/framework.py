@@ -7,6 +7,7 @@ import prettytable as pt
 import os
 import json
 from metrics.function_metrics import span_f1_prune, ECE_Scores, get_predict_prune
+from collections import defaultdict
 
 class FewShotNERFramework:
     def __init__(self, args, logger, task_idx2label, train_data_loader, val_data_loader, test_data_loader, edl, seed_num, num_labels):
@@ -86,6 +87,26 @@ class FewShotNERFramework:
                     for idx in range(sent_num):
                         json.dump(context_results[idx], fout, ensure_ascii=False)
                         fout.write('\n')
+
+                # Optional: Combine with external model outputs
+                if getattr(self.args, 'use_combiner', False):
+                    comb_files = []
+                    if getattr(self.args, 'comb_files', None):
+                        comb_files = [x for x in str(self.args.comb_files).split(',') if len(x.strip()) > 0]
+                    if len(comb_files) > 0:
+                        try:
+                            base_path = results_dir
+                            combined = self.combine_predictions([base_path] + comb_files,
+                                                                method=self.args.comb_method,
+                                                                weights=self.args.comb_weights)
+                            comb_save = os.path.join(self.args.results_dir, f"{self.args.dataname}_{self.args.uncertainty_type}_combined.jsonl")
+                            with open(comb_save, 'w', encoding='utf-8') as fout:
+                                for item in combined:
+                                    json.dump(item, fout, ensure_ascii=False)
+                                    fout.write('\n')
+                            self.logger.info(f"Saved combined results to {comb_save}")
+                        except Exception as e:
+                            self.logger.error(f"Combiner failed: {e}")
 
             return precision, recall, f1, ece
 
@@ -192,3 +213,93 @@ class FewShotNERFramework:
 
     def inference(self, model):
         f1, ece = self.eval(model, mode='test')
+
+    def combine_predictions(self, files, method='majority', weights=None):
+        # Load all files as list of dicts per line
+        lists = []
+        for fp in files:
+            with open(fp, 'r', encoding='utf-8') as f:
+                lists.append([json.loads(line) for line in f])
+        # Ensure same length and sentence alignment
+        base = lists[0]
+        num = len(base)
+        for lst in lists[1:]:
+            if len(lst) != num:
+                raise ValueError('Combiner: input files size mismatch')
+        # Parse weights
+        w = None
+        if method == 'weighted' and weights:
+            w_vals = [float(x) for x in str(weights).split(',')]
+            if len(w_vals) == len(files):
+                w = w_vals
+            elif len(w_vals) == len(files) - 1:
+                w = [1.0] + w_vals
+            else:
+                raise ValueError('Combiner: weights length must match number of files or number of external files')
+        # Label vote per span key (sidx,eidx)
+        combined = []
+        for i in range(num):
+            sent = base[i]['sentence']
+            # Build union of spans across models
+            span_keys = set()
+            for lst in lists:
+                for ent in lst[i].get('entity', []):
+                    if 'span' in ent and isinstance(ent['span'], list) and len(ent['span']) == 2:
+                        span_keys.add(tuple(ent['span']))
+            entities = []
+            for span in sorted(span_keys):
+                label_scores = defaultdict(float)
+                best_conf = 0.0
+                best_unc = 1.0
+                ent_text = None
+                for m_idx, lst in enumerate(lists):
+                    # find matching ent in this model output
+                    found = None
+                    for ent in lst[i].get('entity', []):
+                        if tuple(ent.get('span', [])) == span:
+                            found = ent
+                            break
+                    lab = found.get('llm_pred') if found and found.get('llm_pred') else (found.get('pred') if found else 'O')
+                    if isinstance(lab, list) and len(lab) > 0:
+                        lab = lab[0]
+                    weight = 1.0
+                    if w is not None:
+                        weight = w[m_idx] if m_idx < len(w) else 1.0
+                    label_scores[lab] += weight
+                    if found:
+                        ent_text = found.get('entity', ent_text)
+                        best_conf = max(best_conf, float(found.get('confidence', 0.0)))
+                        best_unc = min(best_unc, float(found.get('uncertainty', 1.0)))
+                # choose label (ignore O unless all are O)
+                if len(label_scores) == 0:
+                    continue
+                # ensure 'O' does not dominate if others exist
+                if 'O' in label_scores and len(label_scores) > 1:
+                    del label_scores['O']
+                final_lab = max(label_scores.items(), key=lambda kv: kv[1])[0]
+                if final_lab == 'O':
+                    continue
+                # find an answer label from any model output for this span
+                answer_lab = 'O'
+                for lst in lists:
+                    for ent in lst[i].get('entity', []):
+                        if tuple(ent.get('span', [])) == span and 'answer' in ent:
+                            ans = ent.get('answer')
+                            if isinstance(ans, list) and len(ans) > 0:
+                                ans = ans[0]
+                            answer_lab = ans
+                            break
+                    if answer_lab != 'O':
+                        break
+                res_val = 1 if final_lab == answer_lab else 0
+                entities.append({
+                    'entity': ent_text if ent_text is not None else '',
+                    'span': [int(span[0]), int(span[1])],
+                    'pred': final_lab,
+                    'answer': answer_lab,
+                    'confidence': best_conf,
+                    'uncertainty': best_unc,
+                    'res': res_val
+                })
+            combined.append({'sentence': sent, 'entity': entities})
+        return combined
