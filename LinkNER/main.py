@@ -64,7 +64,15 @@ def main():
 
     if args.state == 'llm_classify':
         dic = json.load(open(args.selectShot_dir)) if args.selectShot_dir and args.selectShot_dir != 'None' else None
-        linkToLLM(args.input_file, args.save_file, dic, args)
+        # If combiner is enabled and a combined file exists, prefer it as input
+        input_file = args.input_file
+        if getattr(args, 'use_combiner', False):
+            base_dir = os.path.dirname(args.input_file)
+            comb_candidate = os.path.join(base_dir, f"{args.dataname}_{args.uncertainty_type}_combined.jsonl")
+            if os.path.exists(comb_candidate):
+                input_file = comb_candidate
+                logging.info(f"Using combined file for LLM classification: {input_file}")
+        linkToLLM(input_file, args.save_file, dic, args)
         return
 
     num_labels = args.n_class
